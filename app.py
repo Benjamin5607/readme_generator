@@ -58,16 +58,16 @@ def call_groq(prompt):
 # -----------------------------
 # 🧠 JSON 안전 파싱
 # -----------------------------
-def extract_json(text):
-    text = text.replace("```json", "").replace("```", "")
+def parse_sections(text):
     try:
-        return json.loads(text)
+        readme = text.split("===README===")[1].split("===REVIEW===")[0].strip()
+        review = text.split("===REVIEW===")[1].strip()
+        return {
+            "readme": readme,
+            "review": review
+        }
     except:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        else:
-            raise Exception("JSON parsing failed")
+        raise Exception("Parsing failed")
 
 # -----------------------------
 # 🚀 PR 생성
@@ -159,17 +159,16 @@ if st.button("🚀 Run AI"):
         st.write("🧠 AI analyzing...")
 
         prompt = f"""
-You MUST return ONLY valid JSON.
+Return in this EXACT format:
 
-DO NOT include explanation.
-DO NOT include markdown.
-DO NOT include text outside JSON.
+===README===
+<full readme content>
 
-Format:
-{{
-  "readme": "FULL README CONTENT",
-  "review": "CODE REVIEW"
-}}
+===REVIEW===
+<code review>
+
+NO JSON.
+NO explanation.
 
 Code:
 {code}
@@ -180,7 +179,7 @@ Code:
         st.write("📄 RAW OUTPUT (debug)")
         st.code(result)
 
-        data = extract_json(result)
+        data = parse_sections(result)
 
         st.write("🚀 Creating PR...")
 
