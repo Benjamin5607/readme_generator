@@ -1,13 +1,7 @@
 {
-  "name": "repo-analyzer",
-  "version": "1.0.0",
-  "description": "Analyze GitHub repo with Groq",
-  "main": "analyze.js",
-  "scripts": {
-    "start": "node analyze.js"
-  },
+  "name": "ai-github-bot",
+  "type": "module",
   "dependencies": {
-    "axios": "^1.6.0",
-    "dotenv": "^16.0.0"
+    "axios": "^1.6.0"
   }
 }
