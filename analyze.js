@@ -1,10 +1,15 @@
-require("dotenv").config();
-const axios = require("axios");
-const fs = require("fs");
+import axios from "axios";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-// 🔥 GitHub 전체 파일 트리 가져오기
+function parseRepoUrl(url) {
+  const parts = url.split("/");
+  return {
+    owner: parts[3],
+    repo: parts[4]
+  };
+}
+
 async function getRepoTree(owner, repo) {
   const res = await axios.get(
     `https://api.github.com/repos/${owner}/${repo}/git/trees/main?recursive=1`
@@ -12,62 +17,28 @@ async function getRepoTree(owner, repo) {
   return res.data.tree;
 }
 
-// 🔥 중요한 파일 필터링
-function pickImportantFiles(tree) {
-  return tree
-    .filter(file =>
-      file.path.endsWith(".js") ||
-      file.path.endsWith(".ts") ||
-      file.path.endsWith(".json")
-    )
-    .filter(file =>
-      file.path.includes("src") ||
-      file.path.includes("index") ||
-      file.path.includes("main") ||
-      file.path.includes("app") ||
-      file.path.includes("package.json")
-    )
-    .slice(0, 8); // 토큰 제한
+async function getFileContent(owner, repo, path) {
+  const res = await axios.get(
+    `https://api.github.com/repos/${owner}/${repo}/contents/${path}`
+  );
+
+  return Buffer.from(res.data.content, "base64").toString("utf-8");
 }
 
-// 🔥 파일 내용 가져오기
-async function fetchFile(owner, repo, path) {
-  const url = `https://raw.githubusercontent.com/${owner}/${repo}/main/${path}`;
-  try {
-    const res = await axios.get(url);
-    return `FILE: ${path}\n${res.data.substring(0, 2000)}`;
-  } catch {
-    return "";
-  }
+function isValidFile(path) {
+  return [".js", ".ts", ".py", ".md"].some(ext => path.endsWith(ext));
 }
 
-// 🔥 Groq 호출
-async function callGroq(code) {
+async function callGroq(prompt) {
   const res = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
       model: "llama-3.1-8b-instant",
       messages: [
-        {
-          role: "system",
-          content: "You are a senior software architect and reviewer."
-        },
-        {
-          role: "user",
-          content: `
-Analyze this repository and return JSON:
-
-{
-  "readme": "Full README.md content",
-  "review": "Code review summary",
-  "improvements": ["item1", "item2"]
-}
-
-Code:
-${code}
-          `
-        }
-      ]
+        { role: "system", content: "You are a senior software architect." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.2
     },
     {
       headers: {
@@ -80,46 +51,56 @@ ${code}
   return res.data.choices[0].message.content;
 }
 
-// 🔥 메인 실행
-async function analyze(repoUrl) {
-  const [_, owner, repo] = repoUrl.split("/").slice(-3);
+async function main() {
+  const repoUrl = process.argv[2];
+  const { owner, repo } = parseRepoUrl(repoUrl);
 
-  console.log("📦 Fetching repo tree...");
+  console.log("📦 Fetching repo...");
   const tree = await getRepoTree(owner, repo);
 
-  const importantFiles = pickImportantFiles(tree);
+  let code = "";
 
-  console.log("📄 Fetching files...");
-  const contents = await Promise.all(
-    importantFiles.map(f => fetchFile(owner, repo, f.path))
-  );
+  for (const file of tree) {
+    if (file.type !== "blob") continue;
+    if (!isValidFile(file.path)) continue;
 
-  console.log("🧠 Running AI analysis...");
-  const resultText = await callGroq(contents.join("\n\n"));
-
-  let result;
-  try {
-    result = JSON.parse(resultText);
-  } catch (e) {
-    console.log("❌ JSON parse failed. Raw output:\n", resultText);
-    return;
+    try {
+      const content = await getFileContent(owner, repo, file.path);
+      code += `\n\n// FILE: ${file.path}\n${content}`;
+    } catch (e) {
+      console.log("skip:", file.path);
+    }
   }
 
-  console.log("\n📘 README Generated:\n");
-  console.log(result.readme);
+  code = code.slice(0, 12000);
 
-  fs.writeFileSync("README.md", result.readme);
+  console.log("🧠 Running AI...");
 
-  console.log("\n🔍 Review:\n", result.review);
-  console.log("\n⚡ Improvements:\n", result.improvements);
+  const prompt = `
+Analyze this repository and return STRICT JSON:
+
+{
+  "readme": "Full README.md",
+  "review": "Code review summary",
+  "improvements": ["item1"]
 }
 
-// 👉 실행
-const repoUrl = process.argv[2];
+Code:
+${code}
+`;
 
-if (!repoUrl) {
-  console.log("❌ Usage: node analyze.js https://github.com/user/repo");
-  process.exit(1);
+  const output = await callGroq(prompt);
+
+  const json = JSON.parse(output);
+
+  console.log("✅ Done");
+
+  // 파일로 저장
+  const fs = await import("fs");
+  fs.writeFileSync("README.md", json.readme);
+  fs.writeFileSync("review.txt", json.review);
+
+  return json;
 }
 
-analyze(repoUrl);
+main();
