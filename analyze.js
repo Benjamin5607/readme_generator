@@ -10,23 +10,27 @@ function parseRepoUrl(url) {
   };
 }
 
-async function getRepoTree(owner, repo) {
+const allowedExt = [".js", ".ts", ".py", ".md"];
+
+function isValidFile(path) {
+  return allowedExt.some(ext => path.endsWith(ext));
+}
+
+async function getRepoTree(owner, repo, headers) {
   const res = await axios.get(
-    `https://api.github.com/repos/${owner}/${repo}/git/trees/main?recursive=1`
+    `https://api.github.com/repos/${owner}/${repo}/git/trees/main?recursive=1`,
+    { headers }
   );
   return res.data.tree;
 }
 
-async function getFileContent(owner, repo, path) {
+async function getFileContent(owner, repo, path, headers) {
   const res = await axios.get(
-    `https://api.github.com/repos/${owner}/${repo}/contents/${path}`
+    `https://api.github.com/repos/${owner}/${repo}/contents/${path}`,
+    { headers }
   );
 
   return Buffer.from(res.data.content, "base64").toString("utf-8");
-}
-
-function isValidFile(path) {
-  return [".js", ".ts", ".py", ".md"].some(ext => path.endsWith(ext));
 }
 
 async function callGroq(prompt) {
@@ -51,12 +55,71 @@ async function callGroq(prompt) {
   return res.data.choices[0].message.content;
 }
 
+async function createBranch(owner, repo, headers) {
+  const ref = await axios.get(
+    `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/main`,
+    { headers }
+  );
+
+  await axios.post(
+    `https://api.github.com/repos/${owner}/${repo}/git/refs`,
+    {
+      ref: "refs/heads/ai-readme",
+      sha: ref.data.object.sha
+    },
+    { headers }
+  );
+}
+
+async function commitFile(owner, repo, content, headers) {
+  await axios.put(
+    `https://api.github.com/repos/${owner}/${repo}/contents/README.md`,
+    {
+      message: "🤖 AI generated README",
+      content: Buffer.from(content).toString("base64"),
+      branch: "ai-readme"
+    },
+    { headers }
+  );
+}
+
+async function createPR(owner, repo, review, headers) {
+  const pr = await axios.post(
+    `https://api.github.com/repos/${owner}/${repo}/pulls`,
+    {
+      title: "🤖 AI README & Review",
+      head: "ai-readme",
+      base: "main",
+      body: review
+    },
+    { headers }
+  );
+
+  return pr.data.number;
+}
+
+async function commentPR(owner, repo, prNumber, review, headers) {
+  await axios.post(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`,
+    {
+      body: "🤖 AI Review:\n\n" + review
+    },
+    { headers }
+  );
+}
+
 async function main() {
   const repoUrl = process.argv[2];
+  const githubToken = process.argv[3];
+
   const { owner, repo } = parseRepoUrl(repoUrl);
 
+  const headers = {
+    Authorization: `token ${githubToken}`
+  };
+
   console.log("📦 Fetching repo...");
-  const tree = await getRepoTree(owner, repo);
+  const tree = await getRepoTree(owner, repo, headers);
 
   let code = "";
 
@@ -65,9 +128,9 @@ async function main() {
     if (!isValidFile(file.path)) continue;
 
     try {
-      const content = await getFileContent(owner, repo, file.path);
+      const content = await getFileContent(owner, repo, file.path, headers);
       code += `\n\n// FILE: ${file.path}\n${content}`;
-    } catch (e) {
+    } catch {
       console.log("skip:", file.path);
     }
   }
@@ -77,30 +140,34 @@ async function main() {
   console.log("🧠 Running AI...");
 
   const prompt = `
-Analyze this repository and return STRICT JSON:
+Return STRICT JSON:
 
 {
-  "readme": "Full README.md",
-  "review": "Code review summary",
-  "improvements": ["item1"]
+  "readme": "...",
+  "review": "...",
+  "improvements": []
 }
 
 Code:
 ${code}
 `;
 
-  const output = await callGroq(prompt);
+  const aiOutput = await callGroq(prompt);
+  const json = JSON.parse(aiOutput);
 
-  const json = JSON.parse(output);
+  console.log("🌿 Creating branch...");
+  await createBranch(owner, repo, headers);
 
-  console.log("✅ Done");
+  console.log("📝 Committing README...");
+  await commitFile(owner, repo, json.readme, headers);
 
-  // 파일로 저장
-  const fs = await import("fs");
-  fs.writeFileSync("README.md", json.readme);
-  fs.writeFileSync("review.txt", json.review);
+  console.log("🚀 Creating PR...");
+  const prNumber = await createPR(owner, repo, json.review, headers);
 
-  return json;
+  console.log("💬 Commenting...");
+  await commentPR(owner, repo, prNumber, json.review, headers);
+
+  console.log("✅ DONE 🎉");
 }
 
 main();
